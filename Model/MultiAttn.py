@@ -90,64 +90,80 @@ class AddNorm(nn.Module):
         return output
 
 
-'''
-MultiAttnLayer is a layer that integrates multimodal information.
-'''
 class MultiAttnLayer(nn.Module):
-
     def __init__(self, num_heads, model_dim, hidden_dim, dropout_rate):
         super().__init__()
 
-        Q_dim = K_dim = V_dim = model_dim // num_heads
-        self.attn_1 = MultiHeadAttention(num_heads, model_dim, Q_dim, K_dim, V_dim)
+        self.attn_1 = MultiHeadAttention(num_heads, model_dim)
         self.add_norm_1 = AddNorm(model_dim, dropout_rate)
-        self.attn_2 = MultiHeadAttention(num_heads, model_dim, Q_dim, K_dim, V_dim)
+        self.attn_2 = MultiHeadAttention(num_heads, model_dim)
         self.add_norm_2 = AddNorm(model_dim, dropout_rate)
         self.ff = Feedforward(model_dim, hidden_dim, dropout_rate)
         self.add_norm_3 = AddNorm(model_dim, dropout_rate)
 
-
     def forward(self, query_modality, modality_A, modality_B):
-        attn_output_1 = self.add_norm_1(query_modality, lambda query_modality: self.attn_1(query_modality, modality_A, modality_A))
-        attn_output_2 = self.add_norm_2(attn_output_1, lambda attn_output_1: self.attn_2(attn_output_1, modality_B, modality_B))
+        # First attention mechanism with add & norm
+        attn_output_1 = self.add_norm_1(query_modality, lambda x: self.attn_1(x, modality_A, modality_A))
+        
+        # Second attention mechanism with add & norm
+        attn_output_2 = self.add_norm_2(attn_output_1, lambda x: self.attn_2(x, modality_B, modality_B))
+        
+        # Feedforward with add & norm
         ff_output = self.add_norm_3(attn_output_2, self.ff)
-
+        
         return ff_output
 
+class MultiHeadAttention(nn.Module):
+    def __init__(self, num_heads, model_dim):
+        super().__init__()
+        self.multihead_attn = nn.MultiheadAttention(embed_dim=model_dim, num_heads=num_heads)
 
+    def forward(self, query, key, value):
+        attn_output, _ = self.multihead_attn(query, key, value)
+        return attn_output
+    
+    
+class Feedforward(nn.Module):
+    def __init__(self, model_dim, hidden_dim, dropout_rate):
+        super().__init__()
+        self.linear1 = nn.Linear(model_dim, hidden_dim)
+        self.dropout = nn.Dropout(dropout_rate)
+        self.linear2 = nn.Linear(hidden_dim, model_dim)
+        self.relu = nn.ReLU()
+
+    def forward(self, x):
+        return self.linear2(self.dropout(self.relu(self.linear1(x))))
 '''
 Stacks of MultiAttn layers.
 '''
 class MultiAttn(nn.Module):
-
     def __init__(self, num_layers, model_dim, num_heads, hidden_dim, dropout_rate):
         super().__init__()
-
         self.multiattn_layers = nn.ModuleList([
-            MultiAttnLayer(num_heads, model_dim, hidden_dim, dropout_rate) for _ in range(num_layers)])
-
+            MultiAttnLayer(num_heads, model_dim, hidden_dim, dropout_rate) for _ in range(num_layers)
+        ])
 
     def forward(self, query_modality, modality_A, modality_B):
         for multiattn_layer in self.multiattn_layers:
             query_modality = multiattn_layer(query_modality, modality_A, modality_B)
-        
         return query_modality
 
 
 class MultiAttnModel(nn.Module):
-
     def __init__(self, num_layers, model_dim, num_heads, hidden_dim, dropout_rate):
         super().__init__()
-
         self.multiattn_audio_visual = MultiAttn(num_layers, model_dim, num_heads, hidden_dim, dropout_rate)
         self.multiattn_text = MultiAttn(num_layers, model_dim, num_heads, hidden_dim, dropout_rate)
-
+        self.multiattn_audio = MultiAttn(num_layers, model_dim, num_heads, hidden_dim, dropout_rate)
+        self.multiattn_visual = MultiAttn(num_layers, model_dim, num_heads, hidden_dim, dropout_rate)
     
     def forward(self, text_features, audio_features, visual_features):
         # Step 1: Fuse audio and visual modalities
-        audio_visual_fusion = self.multiattn_audio_visual(audio_features, visual_features, visual_features)
+        fused_audio_visual = self.multiattn_audio_visual(audio_features, visual_features, visual_features)
         
-        # Step 2: Fuse the result with textual modality
-        final_fusion = self.multiattn_text(text_features, audio_visual_fusion, audio_visual_fusion)
+        # Step 2: Fuse the audio-visual with textual modality
+        fused_text = self.multiattn_text(text_features, fused_audio_visual, fused_audio_visual)
+        fused_audio = self.multiattn_audio(fused_audio_visual, text_features, fused_audio_visual)
+        fused_visual = self.multiattn_visual(fused_audio_visual, visual_features, fused_audio_visual)
 
-        return final_fusion
+        return fused_text, fused_audio, fused_visual
